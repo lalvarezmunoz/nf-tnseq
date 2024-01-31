@@ -8,6 +8,16 @@
 
 # User-specific files
 .Ruserdata
+data/
+.nextflow/
+reference_genomes/
+results/
+test_data/
+TnSeq_Agro/
+work/
+.nextflow.log*
+manifest.csv
+pipeline_laura.txt
 
 # Example code in package build process
 *-Ex.R
@@ -47,3 +57,6 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+
+
