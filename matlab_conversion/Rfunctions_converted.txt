@@ -208,3 +208,244 @@ hmmconverge <- function(genometa, initialtrans, initialemission) {
   
   return(list(outmat = outmat, a_0 = a_0, b_0 = b_0))
 }
+
+
+library(dplyr)
+
+output_essential <- function(finalessential, uniquenames, uniqueindices) {
+  # Goes through and finds all annotations that have essential regions
+  # You get a 1 for non essential, 2 for essential
+  outputessential <- rep(0, length(uniqueindices))
+  callstats <- rep(0, 3)
+  
+  for (i in 1:length(uniqueindices)) {
+    annotcallsess <- finalessential[uniqueindices[i, 1]:uniqueindices[i, 2], 1]
+    len_ce <- length(annotcallsess)
+    x <- round(len_ce * 0.20)
+    if (x == 0) {
+      x <- 1
+    }
+    min_ce <- min(annotcallsess[x:(len_ce - x)])
+    max_ce <- max(annotcallsess[x:(len_ce - x)])
+    outputessential[i] <- 1
+    if (max_ce > 1) {
+      outputessential[i] <- 3
+      if (min_ce > 1) {
+        outputessential[i] <- 2
+      }
+    }
+    callstats[outputessential[i]] <- callstats[outputessential[i]] + 1
+  }
+  
+  return(list(outputessential = outputessential, callstats = callstats))
+}
+
+
+
+library(stats)
+
+simulateequalsaturation <- function(taproportion, reads, inputreads, boots) {
+  # taproportion is the gap in ta density between libraries
+  # reads is the number of reads to simulate. Reads should equal the total
+  # number of reads in the experimental condition that you want to compare to
+  inputreadssum <- sum(inputreads)
+  inputproportion <- inputreads / inputreadssum
+  inputproportiontanorm <- inputproportion * taproportion
+  inputproportiontanorm <- c(inputproportiontanorm, 1 - taproportion)
+  multinominputsample <- rmultinom(boots, reads, inputproportiontanorm)
+  multinominputsample <- t(multinominputsample)
+  multisum <- rowSums(multinominputsample)
+  difference <- multisum - multinominputsample[nrow(multinominputsample), 1]
+  correction <- matrix(reads / difference, nrow = nrow(multinominputsample), ncol = 1)
+  correctedinput <- multinominputsample * correction
+  bootstrapcontrol <- correctedinput[1:length(inputreads), ]
+  return(bootstrapcontrol)
+}
+
+
+
+runmwuallboots <- function(bootcontrols, experiment, tauniquenames, tauniqueindices) {
+  # Run the bootstrapreplicates
+  m <- nrow(bootcontrols)
+  n <- ncol(bootcontrols)
+  MWUboots <- matrix(0, nrow = length(tauniqueindices), ncol = n)
+  for (i in 1:n) {
+    MWUpvalvector <- MWUbytransposon(experiment, bootcontrols[, i], tauniquenames, tauniqueindices)
+    MWUboots[, i] <- MWUpvalvector
+  }
+  return(MWUboots)
+}
+
+
+
+
+library(stats)
+
+MWUsummarystats <- function(MWU_across_all_boots, pvalue_desired, significant_proportion, uniqueindices, Controlsims, Experiment) {
+  m <- nrow(MWU_across_all_boots)
+  n <- ncol(MWU_across_all_boots)
+  MWUsummary <- matrix(0, nrow = m, ncol = 6)
+
+  for (i in 1:m) {
+    row <- MWU_across_all_boots[i, ]
+    instances_below <- row[row <= pvalue_desired]
+    if (length(instances_below) > 0) {
+      proportion <- length(instances_below) / n
+      MWUsummary[i, 1] <- proportion
+      if (proportion >= significant_proportion) {
+        MWUsummary[i, 2] <- 1
+      }
+    }
+  }
+
+  for (i in 1:m) {
+    norm_MWU <- rep(0, ncol(MWU_across_all_boots))
+    for (j in 1:ncol(MWU_across_all_boots)) {
+      if (is.na(MWU_across_all_boots[i, j])) {
+        norm_MWU[j] <- 1
+      } else {
+        norm_MWU[j] <- MWU_across_all_boots[i, j]
+      }
+    }
+    MWUsummary[i, 3] <- mean(norm_MWU)
+    MWUsummary[i, 4] <- sd(norm_MWU)
+  }
+
+  ctrl_sum <- 0
+  exp_sum <- 0
+  count_ratio <- matrix(0, nrow = length(uniqueindices), ncol = ncol(Controlsims))
+
+  for (y in 1:ncol(Controlsims)) {
+    for (x in 1:length(uniqueindices)) {
+      for (p in uniqueindices[x, 1]:uniqueindices[x, 2]) {
+        ctrl_sum <- Controlsims[p, y] + ctrl_sum
+        exp_sum <- Experiment[p] + exp_sum
+        ratio <- exp_sum / ctrl_sum
+      }
+      if (ratio > 0) {
+        count_ratio[x, y] <- ratio
+      }
+      if (is.nan(exp_sum / ctrl_sum)) {
+        count_ratio[x, y] <- 0
+      }
+      if (is.infinite(ratio)) {
+        count_ratio[x, y] <- exp_sum
+      }
+      if (ratio == 0) {
+        count_ratio[x, y] <- 1 / ctrl_sum
+      }
+      ctrl_sum <- 0
+      exp_sum <- 0
+      ratio <- 0
+    }
+  }
+
+  for (z in 1:m) {
+    MWUsummary[z, 5] <- mean(count_ratio[z, ])
+    MWUsummary[z, 6] <- sd(count_ratio[z, ])
+  }
+
+  return(MWUsummary)
+}
+
+
+library(HMM)
+
+hmmtrainmwu <- function(experiment, controlbootstraps, trainingstates, uniquenames, uniqueindices, mwuthr, denominator1, denominator2, denominator3, q1, q2, q3, q4) {
+  # Get the number of columns in controlbootstraps
+  n <- ncol(controlbootstraps)
+  
+  # Initialize the output matrices
+  hmmmatrix <- matrix(0, nrow = nrow(experiment), ncol = n)
+  trainingmatrix <- matrix(0, nrow = nrow(experiment), ncol = n)
+  
+  for (i in 1:n) {
+    # Step 1: Discretize
+    discta <- discretizeconditional_3(experiment, controlbootstraps[, i], denominator1, denominator2, denominator3, q1, q2, q3, q4)
+    
+    mwutrain <- trainingstates
+    aucmwutrain <- trainingstates
+    
+    for (j in 1:length(uniquenames)) {
+      ratio <- sum(experiment[uniqueindices[j, 1]:uniqueindices[j, 2], 1]) / sum(controlbootstraps[uniqueindices[j, 1]:uniqueindices[j, 2], i])
+      labels <- c(rep(0, uniqueindices[j, 2] - uniqueindices[j, 1] + 1), rep(1, uniqueindices[j, 2] - uniqueindices[j, 1] + 1))
+      scores1 <- experiment[uniqueindices[j, 1]:uniqueindices[j, 2], 1]
+      scores2 <- controlbootstraps[uniqueindices[j, 1]:uniqueindices[j, 2], i]
+      p <- wilcox.test(scores1, scores2)$p.value
+      
+      if (ratio > 1) {
+        if (p < mwuthr) {
+          mwutrain[uniqueindices[j, 1]:uniqueindices[j, 2]] <- 3
+        }
+      }
+      if (ratio < 1) {
+        if (p < mwuthr) {
+          mwutrain[uniqueindices[j, 1]:uniqueindices[j, 2]] <- 4
+        }
+      }
+    }
+    
+    truse <- hmmestimate(discta, mwutrain)$transition
+    em <- hmmestimate(discta, mwutrain)$emission
+    hmm <- hmmviterbi(discta, truse, em)
+    hmmmatrix[, i] <- hmm
+    trainingmatrix[, i] <- mwutrain
+  }
+  
+  stateconfidence <- matrix(0, nrow = nrow(experiment), ncol = max(hmmmatrix))
+  for (j in 1:nrow(experiment)) {
+    for (k in 1:n) {
+      stateconfidence[j, hmmmatrix[j, k]] <- stateconfidence[j, hmmmatrix[j, k]] + 1
+    }
+  }
+  stateconfidence <- stateconfidence / n
+  
+  return(list(hmmmatrix = hmmmatrix, stateconfidence = stateconfidence, trainingmatrix = trainingmatrix))
+}
+
+discretizeconditional_3 <- function(experiment, controlbootstraps, denominator1, denominator2, denominator3, q1, q2, q3, q4) {
+  # Implement the discretizeconditional_3 function in R
+  # This function should take the same input parameters as the MATLAB version
+  # and return the discretized data
+}
+
+
+
+
+library(dplyr)
+
+callconditional <- function(stateconfidence, uniquenames, uniqueindices, minsl, maxsl, minenr, maxenr, propignore) {
+  outputcond <- rep(0, nrow(uniqueindices))
+  callstats <- rep(0, 5)
+  
+  for (i in 1:nrow(uniqueindices)) {
+    annotcallsl <- stateconfidence[uniqueindices[i, 1]:uniqueindices[i, 2], 4]
+    annotcallenr <- stateconfidence[uniqueindices[i, 1]:uniqueindices[i, 2], 3]
+    len_ce <- length(annotcallsl)
+    len_enr <- length(annotcallenr)
+    x <- round(len_ce * propignore)
+    if (x == 0) {
+      x <- 1
+    }
+    min_ce <- min(annotcallsl[x:(len_ce-x)])
+    max_ce <- max(annotcallsl[x:(len_ce-x)])
+    min_enr <- min(annotcallenr[x:(len_enr-x)])
+    max_enr <- max(annotcallenr[x:(len_enr-x)])
+    outputcond[i] <- 5
+    if (max_ce >= maxsl) {
+      outputcond[i] <- 1
+      if (min_ce >= minsl) {
+        outputcond[i] <- 2
+      }
+    }
+    if (max_enr >= maxenr) {
+      outputcond[i] <- 3
+      if (min_enr >= minenr) {
+        outputcond[i] <- 4
+      }
+    }
+    callstats[outputcond[i]] <- callstats[outputcond[i]] + 1
+  }
+  
+  return(list(outputcond = outputcond, callstats = callstats))
+}
