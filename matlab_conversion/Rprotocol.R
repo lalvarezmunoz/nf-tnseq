@@ -1,0 +1,266 @@
+setwd("C:/git/nf-tnseq/matlab_conversion")
+
+library("data.table")
+library("ggplot2")
+
+working_folder <- "inputs"
+
+#import data
+myfiles <- list.files(working_folder, pattern= "_TAmap.txt$", full.names = TRUE)
+read_data <- lapply(myfiles, function (x){
+  y <- as.data.frame(fread(x, header = FALSE))
+  filename <- gsub("_TAmap.txt", "", basename(x))
+  y
+})
+
+test <- read_data[[1]][,7]
+chromosome <- "Chrm 1"
+
+# chrm 1 = 2961149, chrm 2 = 1072315
+
+testchrom1 <- read_data[[1]][read_data[[1]]$V1 == chromosome,]
+# test1 <- read_data[[1]][read_data[[1]]$V1 == chromosome,7]
+# TAsites <- read_data[[1]][read_data[[1]]$V1 == chromosome,2]
+
+
+#### checkseq depth
+
+checkseqdepth <- function(insertions_count) {
+  insertions_count <- insertions_count[,7]
+  totalsequences <- sum(insertions_count)
+  tahit <- insertions_count[insertions_count != 0]
+  fractionhit <- length(tahit) / length(insertions_count)
+  taprop <- insertions_count / totalsequences
+  
+  sensitivityanalysis <- matrix(nrow = 1000, ncol = 2)
+  
+  for (i in seq(1, totalsequences, by = 100000)) {
+    x <- apply(rmultinom(1, i, taprop), 2, as.logical)
+    x <- rowSums(x)
+    z <- mean(x)
+    sensitivityanalysis[ceiling(i / 100000), 1] <- i
+    sensitivityanalysis[ceiling(i / 100000), 2] <- z
+  }
+  
+  plot(sensitivityanalysis[, 1], sensitivityanalysis[, 2], pch = 20, xlab = "Sequence Depth", ylab = "Mean Hits")
+  
+  return(sensitivityanalysis)
+}
+
+checkseqdepth(testchrom1)
+
+
+##### generate scatter plot
+
+scatter_pre <- ggplot(testchrom1, aes(V2, V7)) +
+  geom_point() +
+  theme_bw() +
+  labs(x="Position",
+       y = "Insertions")
+  
+scatter_pre
+
+
+##### correct positional bias
+
+#in matlab I execute like this:
+#[Cnorm]=window_average(Vc_TAsites,C,100000,4033464);
+
+
+
+# window_average <- function(TAsites, Total_reads, windowsize, genome_length) {
+window_average <- function(mydataset, windowsize, genome_length) {
+  # Sets up the genomic window that you want with the first window starting at the first nt
+  num_windows <- genome_length / windowsize # calculates how many windows you will create
+  windowfix <- floor(num_windows) # rounds down the number of window
+  leftover_window_start <- (windowfix * windowsize) + 1
+  leftover_window_end <- (windowfix * windowsize) + (genome_length - (windowfix * windowsize)) # uses the remaining reads to define
+  
+  Total_reads <- mydataset[,7]
+  TAsites <- mydataset[,2]
+  
+  nonzeroindices <- which(Total_reads > 0) # finds where sites with reads are in the list from TAsites or Tn5sites
+  TAsites_nonzero <- TAsites[nonzeroindices]
+  reads_nonzero <- Total_reads[nonzeroindices] # pulls out the reads at each insertion when they are >0
+  
+  chr_ave <- sum(Total_reads) / length(reads_nonzero) # calculates chromosomal read average at all sites with reads
+  
+  # Iterates through the windows to calculate the window average and scaling factor, and adjusts the reads accordingly
+  TA_window_indice <- rep(0, length(nonzeroindices))
+  TA_window_reads <- rep(0, windowfix)
+  counter <- rep(0, windowfix)
+  
+  for (x in 1:windowfix) {
+    for (p in 1:length(nonzeroindices)) {
+      if (TAsites_nonzero[p] >= ((x * windowsize) - windowsize + 1) & TAsites_nonzero[p] <= (x * windowsize)) {
+        TA_window_indice[p] <- x
+        counter[x] <- counter[x] + 1
+        TA_window_reads[x] <- TA_window_reads[x] + reads_nonzero[p] # running total of all reads that fit in each window
+      }
+    }
+  }
+  
+  mean_reads <- TA_window_reads / counter # for main windows, calculate the reads in each window
+  scale <- chr_ave / mean_reads # the scale factor is to be multiplied to the reads in each window
+  
+  corrected_reads <- rep(0, length(TA_window_indice))
+  normalized_reads <- rep(0, length(Total_reads))
+  
+  for (x in 1:length(TA_window_indice)) {
+    if (TA_window_indice[x] > 0) {
+      window_scalar <- scale[TA_window_indice[x]]
+      corrected_reads[x] <- round(reads_nonzero[x] * window_scalar) # scale each read to the correction factor calculated for the window
+      normalized_reads[nonzeroindices[x]] <- corrected_reads[x]
+    }
+  }
+  
+  # Performs the same functions for the last leftover sequence
+  TA_window_indice <- rep(0, length(nonzeroindices)) # reset TA_window_indice so you don't calculate the past window data again
+  TA_window_reads <- rep(0, windowfix + 1)
+  counter <- rep(0, windowfix + 1)
+  
+  for (p in 1:length(nonzeroindices)) {
+    if (TAsites_nonzero[p] >= leftover_window_start & TAsites_nonzero[p] <= leftover_window_end) {
+      TA_window_indice[p] <- windowfix + 1
+      counter[windowfix + 1] <- counter[windowfix + 1] + 1
+      TA_window_reads[windowfix + 1] <- TA_window_reads[windowfix + 1] + reads_nonzero[p] # running total of all reads that fit in each window
+    }
+  }
+  
+  mean_reads <- TA_window_reads / counter
+  scale <- chr_ave / mean_reads
+  
+  for (x in 1:length(TA_window_indice)) {
+    if (TA_window_indice[x] > 0) {
+      window_scalar <- scale[TA_window_indice[x]]
+      corrected_reads[x] <- round(reads_nonzero[x] * window_scalar)
+      normalized_reads[nonzeroindices[x]] <- corrected_reads[x]
+    }
+  }
+  
+  mydataset$V8 <- normalized_reads
+  return(mydataset)
+}
+
+norm_reads <- window_average(testchrom1, 10000, 2961149)
+
+scatter_post <- ggplot(norm_reads, aes(V2, V8)) +
+  geom_point() +
+  theme_bw() +
+  labs(x="Position",
+       y = "Insertions")
+
+scatter_post
+
+
+######################### WROKING OK TO THIS POINT ######################################
+
+
+
+##### sliding window
+
+Slidingwindow <- function(taseq, bootstraps, windowsize, uniquenames, uniqueindices, threshold) {
+  # first generate nbootstraps of size windowsize
+  # during this score all bootstraps for % TAs that are not empty and total
+  # tas hit
+  boots <- matrix(sample(length(taseq), windowsize * bootstraps, replace = TRUE), nrow = windowsize, ncol = bootstraps)
+  bootstats <- matrix(0, nrow = 2, ncol = bootstraps)
+  essentialregions <- rep(0, length(taseq))
+  essentiallist <- rep(0, length(uniquenames))
+  essentialpvals <- rep(0, length(taseq))
+  
+  for (i in 1:bootstraps) {
+    taboots <- taseq[boots[, i], 1]
+    totalta <- sum(taboots)
+    numbernothit <- sum(taboots == 0)
+    numberhit <- sum(taboots != 0)
+    fractionhit <- numberhit / (numberhit + numbernothit)
+    bootstats[1, i] <- totalta
+    bootstats[2, i] <- fractionhit
+  }
+  
+  for (i in 1:length(taseq)) {
+    windowval <- 0
+    if (length(taseq) - i >= windowsize) {
+      windowval <- taseq[i:(i + windowsize - 1)]
+      sumwindowval <- sum(windowval)
+      probofgettincurrentwindow <- pnorm(sumwindowval, mean(bootstats[1, ]), sd(bootstats[1, ]))
+      essentialpvals[i] <- probofgettincurrentwindow
+      if (probofgettincurrentwindow < threshold) {
+        essentialregions[i:(i + windowsize - 1)] <- 1
+      }
+    } else {
+      windowval <- c(taseq[i:length(taseq)], taseq[1:(i - 1)])
+      sumwindowval <- sum(windowval)
+      probofgettincurrentwindow <- pnorm(sumwindowval, mean(bootstats[1, ]), sd(bootstats[1, ]))
+      essentialpvals[i] <- probofgettincurrentwindow
+      if (probofgettincurrentwindow < threshold) {
+        essentialregions[i:length(taseq)] <- 1
+      }
+    }
+  }
+  
+  for (i in 1:length(uniquenames)) {
+    essentialfeatures <- essentialregions[uniqueindices[i, 1]:uniqueindices[i, 2]]
+    if (sum(essentialfeatures) == length(essentialfeatures)) {
+      essentiallist[i] <- 1
+    }
+  }
+  
+  return(list(essentialregions = essentialregions, essentiallist = essentiallist, bootstats = bootstats, essentialpvals = essentialpvals))
+}
+
+
+
+##### discretize
+
+discretize5 <- function(TAarray, zero, one, sevfive, whisker) {
+  discta <- vector(length = length(TAarray))
+  for (i in 1:length(TAarray)) {
+    if (TAarray[i, 1] == zero) {
+      discta[i] <- 1
+    } else if (TAarray[i, 1] > 0 && TAarray[i, 1] <= one) {
+      discta[i] <- 2
+    } else if (TAarray[i, 1] > one && TAarray[i, 1] < sevfive) {
+      discta[i] <- 3
+    } else if (TAarray[i, 1] > (sevfive - 1) && TAarray[i, 1] < whisker) {
+      discta[i] <- 4
+    } else if (TAarray[i, 1] > (whisker - 1)) {
+      discta[i] <- 5
+    }
+  }
+  return(discta)
+}
+
+
+
+#### hmm estimate
+
+
+#### hmmconverge
+
+library(HMM)
+
+hmmconverge <- function(genometa, initialtrans, initialemission) {
+  i <- 1
+  m <- nrow(genometa)
+  n <- ncol(genometa)
+  outmat <- matrix(0, nrow = m, ncol = 100)
+  a <- initialtrans
+  b <- initialemission
+  j <- 1
+  
+  while (i > 0) {
+    a_0 <- a
+    b_0 <- b
+    states <- hmmviterbi(genometa, a_0, b_0)
+    hmmfit <- hmmestimate(genometa, states)
+    a <- hmmfit$A
+    b <- hmmfit$B
+    outmat[, j] <- states
+    i <- (a[1, 1] - a_0[1, 1])
+    j <- j + 1
+  }
+  
+  return(list(outmat = outmat, a_0 = a_0, b_0 = b_0))
+}

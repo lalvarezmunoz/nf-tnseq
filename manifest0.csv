@@ -1,0 +1,3 @@
+id,file
+A1,./test_data/Agro-wt1_S1_L001_R1_001.fastq.gz
+A2,./test_data/Agro-wt2_S2_L001_R1_001.fastq.gz
